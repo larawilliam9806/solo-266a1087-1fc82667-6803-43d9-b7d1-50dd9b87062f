@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 COPY templates templates
+COPY tools tools
 
 ENV APP_DB=/data/app.db \
     PORT=8000

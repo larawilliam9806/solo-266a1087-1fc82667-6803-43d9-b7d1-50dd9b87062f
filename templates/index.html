@@ -36,6 +36,7 @@
   .badge { background: #eef2f6; border-radius: 999px; padding: 5px 14px;
            font-size: 13px; color: #334e68; }
   .badge.locked { background: #fdecea; color: #b3261e; }
+  .badge.verified { background: #e3f2e9; color: #1c6b3c; }
   table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
   th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #e4e7eb; }
   th { color: #52606d; font-weight: 600; }
@@ -45,7 +46,7 @@
 <body>
 <header>
   <h1>地铁每日首程客流 · 差分隐私查询平台</h1>
-  <p>每次新查询添加 Laplace(0, 2) 噪声并扣除 {{ query_cost }} 隐私预算,每日总额 {{ daily_budget }};相同查询复用原结果,不再扣费。查询页只显示加噪结果。</p>
+  <p>每次新查询添加 Laplace(0, 2) 噪声并扣除 {{ query_cost }} 隐私预算,每日总额 {{ daily_budget }};相同查询复用原结果,不再扣费。查询页只显示加噪结果。支持 CSV + 清单验签导入,按修订号整日替换。</p>
 </header>
 <main>
   <section>
@@ -55,14 +56,39 @@
       <input type="date" id="upDate" required>
       <label for="upFile">CSV 文件(UTF-8)</label>
       <input type="file" id="upFile" accept=".csv,text/csv" required>
-      <button type="submit">上传 / 整日替换</button>
+      <label for="upManifest">验签清单(可选;提供后按验签导入处理)</label>
+      <input type="file" id="upManifest" accept=".json,application/json">
+      <button type="submit">上传 / 验签导入</button>
     </form>
     <div class="msg" id="uploadMsg"></div>
-    <div class="hint">首个成功查询会锁定当天源数据;锁定前可整日替换,锁定后拒绝替换。</div>
+    <div class="hint">不带清单时为普通上传:锁定前可整日替换,锁定后拒绝;某日一旦验签导入,普通上传不能再覆盖。
+      需要按修订号升级时请使用下方验签导入。</div>
   </section>
 
   <section>
-    <h2>② 查询客流(仅显示加噪结果)</h2>
+    <h2>② 验签导入(CSV + 清单)</h2>
+    <form id="importForm">
+      <label for="imDate">数据日期(须与清单一致)</label>
+      <input type="date" id="imDate" required>
+      <div class="row">
+        <div>
+          <label for="imCsv">CSV 文件(UTF-8)</label>
+          <input type="file" id="imCsv" accept=".csv,text/csv" required>
+        </div>
+        <div>
+          <label for="imManifest">清单文件(JSON)</label>
+          <input type="file" id="imManifest" accept=".json,application/json" required>
+        </div>
+      </div>
+      <button type="submit">验签并导入</button>
+    </form>
+    <div class="msg" id="importMsg"></div>
+    <div class="hint">清单包含 date、revision(递增修订号)、sha256(CSV 原始字节摘要)与 signature(HMAC-SHA256)。
+      仅更高修订号可整日替换;同版同文件重传不改数据,冲突或降版拒绝;首个成功查询锁定后禁止替换。</div>
+  </section>
+
+  <section>
+    <h2>③ 查询客流(仅显示加噪结果)</h2>
     <label for="qDate">数据日期</label>
     <input type="date" id="qDate">
     <div class="row">
@@ -81,7 +107,7 @@
   </section>
 
   <section>
-    <h2>③ 当日状态与已发布结果</h2>
+    <h2>④ 当日状态与已发布结果</h2>
     <div class="badges" id="statusBadges"></div>
     <table id="historyTable">
       <thead><tr><th>#</th><th>进站集合</th><th>出站集合</th><th>加噪人数</th><th>发布时间(UTC)</th></tr></thead>
@@ -95,6 +121,11 @@ const $ = id => document.getElementById(id);
 function showMsg(el, text, ok) {
   el.textContent = text;
   el.className = "msg " + (ok ? "ok" : "err");
+}
+
+function rejectText(data) {
+  const reason = data.reason ? ` [${data.reason}]` : "";
+  return (data.error || "请求失败") + reason;
 }
 
 async function refreshStations() {
@@ -119,10 +150,14 @@ async function refreshStatus() {
   ]);
   const st = await stRes.json(), q = await qRes.json();
   if (st.ok) {
+    const verifiedBadge = st.verified
+      ? `<span class="badge verified">验签通过 · 修订号 ${st.revision}</span>`
+      : `<span class="badge">未验签导入 · 修订号 0</span>`;
     $("statusBadges").innerHTML =
+      verifiedBadge +
       `<span class="badge">源数据行数:${st.rows}</span>` +
       `<span class="badge">预算:已用 ${st.budget_spent} / ${st.daily_budget}(剩余 ${st.budget_remaining})</span>` +
-      `<span class="badge ${st.locked ? "locked" : ""}">${st.locked ? "源数据已锁定" : "源数据未锁定(可替换)"}</span>`;
+      `<span class="badge ${st.locked ? "locked" : ""}">${st.locked ? "源数据已锁定(禁止替换)" : "源数据未锁定(可替换)"}</span>`;
   }
   const tbody = $("historyTable").querySelector("tbody");
   tbody.innerHTML = "";
@@ -140,10 +175,31 @@ $("uploadForm").addEventListener("submit", async e => {
   const fd = new FormData();
   fd.append("date", $("upDate").value);
   fd.append("file", $("upFile").files[0]);
+  const manifestFile = $("upManifest").files[0];
+  if (manifestFile) fd.append("manifest", manifestFile);
   const res = await fetch("/upload", { method: "POST", body: fd });
   const data = await res.json();
-  showMsg($("uploadMsg"), data.ok ? data.message : ("上传失败:" + data.error), data.ok);
+  const label = manifestFile ? "验签导入" : "上传";
+  showMsg($("uploadMsg"), data.ok ? data.message : (label + "失败:" + rejectText(data)), data.ok);
   if (data.ok) { $("qDate").value = $("upDate").value; refreshStations(); refreshStatus(); }
+});
+
+$("importForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const fd = new FormData();
+  const date = $("imDate").value;
+  fd.append("date", date);
+  fd.append("csv", $("imCsv").files[0]);
+  fd.append("manifest", $("imManifest").files[0]);
+  const res = await fetch("/import", { method: "POST", body: fd });
+  const data = await res.json();
+  if (data.ok) {
+    const extra = data.unchanged ? "(同版同文件,数据未变)" : "";
+    showMsg($("importMsg"), `导入成功:修订号 ${data.revision},${data.rows} 行 ${extra}`, true);
+    $("qDate").value = date; refreshStations(); refreshStatus();
+  } else {
+    showMsg($("importMsg"), "导入被拒绝:" + rejectText(data), false);
+  }
 });
 
 $("queryBtn").addEventListener("click", async () => {
@@ -168,14 +224,14 @@ $("queryBtn").addEventListener("click", async () => {
       (data.budget_remaining !== undefined ? ` 当日剩余预算:${data.budget_remaining}` : "") + `</div>`;
   } else {
     out.style.display = "none";
-    showMsg(msg, "查询失败:" + data.error, false);
+    showMsg(msg, "查询失败:" + rejectText(data), false);
   }
   refreshStatus();
 });
 
 $("qDate").addEventListener("change", () => { refreshStations(); refreshStatus(); });
 const today = new Date().toISOString().slice(0, 10);
-$("upDate").value = today; $("qDate").value = today;
+$("upDate").value = today; $("imDate").value = today; $("qDate").value = today;
 refreshStations(); refreshStatus();
 </script>
 </body>

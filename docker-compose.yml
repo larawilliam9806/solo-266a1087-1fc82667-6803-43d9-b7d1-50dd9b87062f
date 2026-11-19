@@ -5,6 +5,10 @@ services:
       - "8000:8000"
     environment:
       APP_DB: /data/app.db
+      # 验签密钥: 推荐在 .env 中设置 MANIFEST_HMAC_KEY, 不要提交到版本库。
+      # 留空时服务仍可查询, 但验签导入会返回 503 key_not_configured。
+      MANIFEST_HMAC_KEY: ${MANIFEST_HMAC_KEY:-}
+      # 也可改为挂载密钥文件并使用 MANIFEST_HMAC_KEY_FILE=/run/secrets/hmac_key
     volumes:
       - appdata:/data   # 持久化 SQLite, 重启后已发布结果与预算状态不丢失
     restart: unless-stopped
